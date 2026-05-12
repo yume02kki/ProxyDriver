@@ -6,6 +6,7 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/pid.h>
+#include <linux/mm_types.h>
 
 #include "charproxy_fops.h"
 #include "ioctl_proxy.h"
@@ -14,6 +15,63 @@ static dev_t dev_num;
 static struct cdev charproxy_cdev;
 static struct class *charproxy_class;
 
+static long dump_maps_ioctl(unsigned long arg)
+{
+    struct dump_maps_request req;
+    struct pid *pid_struct;
+    struct task_struct *task;
+    struct mm_struct *mm;
+    struct vm_area_struct *vma;
+    struct vma_entry entry;
+    uint32_t count = 0;
+    struct vma_iterator vmi;
+
+    if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+        return -EFAULT;
+
+    pid_struct = find_get_pid(req.pid);
+    if (!pid_struct)
+        return -ESRCH;
+
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    put_pid(pid_struct);
+    if (!task)
+        return -ESRCH;
+
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    if (!mm)
+        return -EINVAL;
+
+    mmap_read_lock(mm);
+    vma_iter_init(&vmi, mm, 0);
+    for_each_vma(vmi, vma) {
+        if (count < req.max_entries) {
+            entry.start = vma->vm_start;
+            entry.end   = vma->vm_end;
+            entry.prot  = 0;
+            if (vma->vm_flags & VM_READ)  entry.prot |= 1;
+            if (vma->vm_flags & VM_WRITE) entry.prot |= 2;
+            if (vma->vm_flags & VM_EXEC)  entry.prot |= 4;
+
+            if (copy_to_user(&req.entries[count], &entry, sizeof(entry))) {
+                mmap_read_unlock(mm);
+                mmput(mm);
+                return -EFAULT;
+            }
+        }
+        count++;
+    }
+    mmap_read_unlock(mm);
+    mmput(mm);
+
+    /* write back actual count so userspace knows total VMAs */
+    if (put_user(count, &((struct dump_maps_request __user *)arg)->count))
+        return -EFAULT;
+
+    return 0;
+}
+
 long charproxy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct proxy_request req;
@@ -21,6 +79,9 @@ long charproxy_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     struct task_struct *task;
     u8 *kbuf;
     ssize_t ret;
+
+    if (cmd == IOCTL_DUMP_MAPS)
+        return dump_maps_ioctl(arg);
 
     if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
         return -EFAULT;
