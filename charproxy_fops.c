@@ -44,5 +44,6 @@ const struct file_operations charproxy_fops = {
     .release = release,
     .read = read,
     .write = write,
+    .llseek = noop_llseek,
     .unlocked_ioctl = charproxy_ioctl,
 };
